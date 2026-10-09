@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<title>fpvsim · collide</title>
+<style>body{font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;background:#0b1418;color:#cfe6ef;padding:20px}
+pre{margin:0}#verdict{font-weight:700;margin-top:10px}</style>
+</head>
+<body>
+<pre id="out"></pre>
+<div id="verdict"></div>
+<!-- collide() is the one piece of the sim with no node test, because world.js imports
+     three. Serve the project and open this file:
+       python3 -m http.server 8000   ->   http://localhost:8000/test/collide.html -->
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { createWorld } from '../src/world.js';
+
+const out = document.getElementById('out');
+const verdict = document.getElementById('verdict');
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+
+const world = createWorld(new THREE.Scene());
+const R = world.droneRadius;
+const _v = new THREE.Vector3(), _iq = new THREE.Quaternion();
+
+/** Signed distance from the drone to one bar, in gate-local space: >0 outside, <0 inside. */
+function barGap(p, g, b) {
+  _v.copy(p).sub(g.pos).applyQuaternion(_iq.copy(g.quat).invert());
+  const q = [
+    Math.abs(_v.x - b.c.x) - b.h.x,
+    Math.abs(_v.y - b.c.y) - b.h.y,
+    Math.abs(_v.z - b.c.z) - b.h.z,
+  ];
+  return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0))
+       + Math.min(Math.max(q[0], q[1], q[2]), 0);
+}
+const buried = (p, g) => Math.min(...g.boxes.map((b) => barGap(p, g, b)));
+
+// Sweep a slab straddling every gate frame. These are contact states the drone only
+// reaches while cutting a corner, which is exactly where a single-pass box resolve
+// used to drop it: _v left in world space between bars, the "nearest face" metric
+// picking the far end of a metres-long bar, and the exit path zeroing the two
+// coordinates it should have kept.
+let contacts = 0, stillBuried = 0, overburden = 0, worst = 0;
+for (const g of world.gates) {
+  for (let lx = -2; lx <= 2; lx += 0.05) {
+    for (let ly = -2; ly <= 2; ly += 0.05) {
+      for (const lz of [-0.2, -0.05, 0, 0.05, 0.2]) {
+        const p = new THREE.Vector3(lx, ly, lz).applyQuaternion(g.quat).add(g.pos);
+        const v = new THREE.Vector3(-g.fwd.x * 6, -g.fwd.y * 6, -g.fwd.z * 6);
+        if (!world.collide(p, v)) continue;   // never touched anything
+        contacts++;
+        const over = R - buried(p, g);
+        if (over > 1e-6) { stillBuried++; overburden += over; worst = Math.max(worst, over); }
+      }
+    }
+  }
+}
+
+const avg = overburden / contacts;
+log(`drone radius ${R} m, ${contacts} contact positions swept over ${world.gates.length} gates`);
+log(`left inside a bar: ${stillBuried} (${(stillBuried / contacts * 100).toFixed(3)}%),` +
+    ` mean ${(avg * 1000).toFixed(3)} mm, worst ${(worst * 1000).toFixed(1)} mm`);
+
+// The residue is the leg overlapping the bottom bar by 5 mm: pushing out of one box
+// lands in the next. It clears on the following frame, so it is bounded, not zero.
+// Both limits sit ~15x under what the old resolver produced on the same sweep.
+const ok = avg < 0.001 && stillBuried / contacts < 0.005;
+verdict.textContent = ok
+  ? 'PASS — a single collide() leaves the drone buried by at most a few mm'
+  : 'FAIL — collide() is dropping the drone inside the gate frames';
+verdict.style.color = ok ? '#9dff5e' : '#ff6b5e';
+document.title = ok ? 'collide PASS' : 'collide FAIL';
+</script>
+</body>
+</html>

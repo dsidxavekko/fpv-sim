@@ -1,0 +1,162 @@
+// node test/physics.test.mjs
+import assert from 'node:assert/strict';
+import { CFG, createDrone, resetDrone, run, step, hoverThrottle, startFlip, rateFor, mixer } from '../src/physics.js';
+import { DEFAULTS } from '../src/settings.js';
+
+const hover = hoverThrottle();
+console.log(`hover throttle = ${hover.toFixed(3)}  (want ~0.45-0.55)`);
+
+// 1. hover: constant throttle, altitude must not drift away.
+{
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 0, z: 0 });
+  run(d, { throttle: hover, pitch: 0, roll: 0, yaw: 0 }, 4);
+  console.log(`hover drift 4s = ${d.p.y.toFixed(3)} m, |v| = ${Math.hypot(d.v.x, d.v.y, d.v.z).toFixed(3)}`);
+  assert.ok(Math.abs(d.p.y) < 0.5, `hover drifted to ${d.p.y.toFixed(2)} m`);
+}
+
+// 2. free fall must accelerate at g (measured as a difference, drag is tiny here).
+{
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 0, z: 0 });
+  run(d, { throttle: 0, pitch: 0, roll: 0, yaw: 0 }, 0.4); // let motors spool down
+  const v0 = d.v.y;
+  run(d, { throttle: 0, pitch: 0, roll: 0, yaw: 0 }, 0.1);
+  const g = (d.v.y - v0) / -0.1;
+  console.log(`free fall g = ${g.toFixed(2)} m/s^2`);
+  assert.ok(Math.abs(g - 9.81) < 0.4, `expected ~9.81, got ${g.toFixed(2)}`);
+}
+
+// 3. rate step response: how fast does the drone reach the commanded roll rate?
+{
+  const rates = DEFAULTS.rates;
+  const target = rateFor(1, rates.roll);   // already rad/s
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 0, z: 0 });
+  run(d, { throttle: hover, pitch: 0, roll: 0, yaw: 0 }, 1, rates); // settle at hover
+
+  let t = 0, rise = null, peak = 0;
+  const n = Math.round(1.5 / CFG.dt);
+  for (let i = 0; i < n; i++) {
+    step(d, { throttle: hover, pitch: 0, roll: 1, yaw: 0 }, CFG.dt, rates);
+    t += CFG.dt;
+    peak = Math.min(peak, d.w.z); // bank right = negative body-Z rate
+    if (rise === null && -d.w.z >= target * 0.9) rise = t;
+  }
+  const over = ((-peak - target) / target) * 100;
+  console.log(`roll: target ${(target * 180 / Math.PI).toFixed(0)} deg/s, rise(90%) = ${rise === null ? 'never' : (rise * 1000).toFixed(0) + ' ms'}, peak = ${(-peak * 180 / Math.PI).toFixed(0)} deg/s, overshoot = ${over.toFixed(1)}%`);
+  assert.ok(rise !== null, 'roll never reached 90% of commanded rate');
+  assert.ok(rise < 0.3, `rise time ${rise === null ? 'n/a' : (rise * 1000).toFixed(0)} ms is too slow`);
+  assert.ok(over < 40, `overshoot ${over.toFixed(0)}% is too high`);
+  assert.ok(Math.abs(-d.w.z - target) < target * 0.08, `settled at ${(-d.w.z * 180 / Math.PI).toFixed(0)} deg/s, want ${(target * 180 / Math.PI).toFixed(0)}`);
+}
+
+// 4. rotation direction: stick right must bank right (negative body-Z rate)
+//    and stick forward must pitch nose-up (positive body-X rate).
+{
+  const mk = (input) => {
+    const d = createDrone();
+    resetDrone(d, { x: 0, y: 0, z: 0 });
+    run(d, { throttle: hover, ...input }, 0.3);
+    return d;
+  };
+  const right = mk({ throttle: hover, pitch: 0, roll: 1, yaw: 0 });
+  assert.ok(right.w.z < -1, 'roll stick right should give negative body-Z rate');
+  const fwd = mk({ throttle: hover, pitch: -1, roll: 0, yaw: 0 }); // stick forward = nose down
+  assert.ok(fwd.w.x < -1, 'stick forward should give negative body-X rate (nose down)');
+  const yawR = mk({ throttle: hover, pitch: 0, roll: 0, yaw: 1 });
+  assert.ok(yawR.w.y > 1, 'yaw right should give positive body-Y rate');
+}
+
+// 5. flip recovers to level flight.
+{
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 0, z: 0 });
+  run(d, { throttle: hover, pitch: 0, roll: 0, yaw: 0 }, 1);
+  startFlip(d, 1);
+  run(d, { throttle: hover, pitch: 0, roll: 0, yaw: 0 }, 1.5);
+  const up = 1 - 2 * (d.q.x * d.q.x + d.q.z * d.q.z); // cos(roll angle)
+  console.log(`flip: ended roll = ${((Math.acos(clamp1(up)) * 180) / Math.PI).toFixed(0)} deg`);
+  assert.ok(Math.abs(up - 1) < 0.05, 'flip should end roughly level');
+}
+function clamp1(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
+
+// 6. no NaN / no blowup under 60 s of violent random input.
+{
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 0, z: 0 });
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+  run(d, { throttle: hover, pitch: 0, roll: 0, yaw: 0 }, 1);
+  for (let i = 0; i < Math.round(60 / CFG.dt); i++) {
+    step(d, { throttle: (rnd() + 1) / 2, pitch: rnd(), roll: rnd(), yaw: rnd() });
+  }
+  const bad = !isFinite(d.p.x + d.p.y + d.p.z + d.v.x + d.v.y + d.v.z + d.q.w);
+  console.log(`60s random: pos ${d.p.x.toFixed(0)},${d.p.y.toFixed(0)},${d.p.z.toFixed(0)}`);
+  assert.ok(!bad, 'state went non-finite');
+  assert.ok(Math.hypot(d.v.x, d.v.y, d.v.z) < 200, 'velocity exploded');
+}
+
+// 7. airmode: when a channel saturates the total thrust must survive
+{
+  // low throttle + a big roll demand: two motors want to go negative
+  const cmds = mixer({ x: 0, y: 0, z: 0.35 }, 0.2);
+  const sum = cmds.reduce((a, c) => a + c, 0);
+  console.log(`airmode: mixer at 0.2 throttle -> [${cmds.map((c) => c.toFixed(3)).join(', ')}], sum ${sum.toFixed(3)} (want 0.800)`);
+  assert.ok(Math.abs(sum - 0.8) < 1e-3, `total motor command drifted to ${sum.toFixed(3)}`);
+  assert.ok(cmds.every((c) => c >= 0 && c <= 1), 'commands left the 0..1 range');
+  // without airmode this case would silently double the requested thrust
+  const naive = [0.2 - 0.6, 0.2 + 0.6, 0.2 - 0.6, 0.2 + 0.6].map((c) => Math.min(1, Math.max(0, c)));
+  assert.ok(naive.reduce((a, c) => a + c, 0) > sum + 0.5, 'test is meaningless: naive mix does not overshoot');
+
+  // a demand the motors genuinely cannot meet must clamp, not exceed, the range
+  const hard = mixer({ x: 0, y: 0, z: 9 }, 0.2);
+  assert.ok(hard.every((c) => c >= 0 && c <= 1), 'commands left the 0..1 range');
+}
+
+// 8. tilt compensation: holding a bank must not cost altitude when it is on.
+// Acro keeps whatever attitude you leave it in, so pin a 45 deg bank and hold it.
+// Compare altitude drift: with the higher forward drag the compensated case now
+// climbs slightly (real aerodynamics, the body-axis drag tilts with the craft),
+// so the check is "materially better than uncompensated", not "exactly zero".
+{
+  const rates = DEFAULTS.rates;
+  const held = (opts) => {
+    const d = createDrone();
+    resetDrone(d, { x: 0, y: 0, z: 0 });
+    const phi = Math.PI / 4;
+    d.q = { x: 0, y: 0, z: Math.sin(phi / 2), w: Math.cos(phi / 2) };
+    run(d, { throttle: hover, pitch: 0, roll: 0, yaw: 0 }, 2, rates, opts);
+    return d.p.y;
+  };
+  const off = held({ tiltComp: false });
+  const on = held({ tiltComp: true });
+  console.log(`tilt compensation: 2s holding a 45 deg bank  off=${off.toFixed(2)}m  on=${on.toFixed(2)}m`);
+  assert.ok(off < -2, `a 45 deg bank should cost altitude with compensation off, got ${off.toFixed(2)} m`);
+  assert.ok(Math.abs(on) < 1.5, `compensation should roughly hold altitude, drifted to ${on.toFixed(2)} m`);
+  assert.ok(on > off + 1.5, 'compensation made no meaningful difference');
+}
+
+// 9. top speed must look like a real 5" quad. This is the check that failed
+//    when drag was 7x too low and the sim hit 190 km/h in a shallow dive.
+{
+  // Horizontal speed is what the pilot feels; vertical is a by-product of the bank.
+  const speed = (bankDeg, throttle) => {
+    const d = createDrone();
+    resetDrone(d, { x: 0, y: 50000, z: 0 });
+    const phi = (bankDeg * Math.PI) / 180;
+    d.q = { x: 0, y: 0, z: Math.sin(phi / 2), w: Math.cos(phi / 2) };
+    for (let i = 0; i < Math.round(15 / CFG.dt); i++) {
+      step(d, { throttle, pitch: 0, roll: 0, yaw: 0 }, CFG.dt, DEFAULTS.rates, { tiltComp: false });
+    }
+    return Math.hypot(d.v.x, d.v.z) * 3.6;
+  };
+  const full = speed(45, 1.0);
+  const cruise = speed(30, 0.7);
+  console.log(`top speed: full throttle 45deg bank = ${full.toFixed(0)} km/h, 70% throttle 30deg bank = ${cruise.toFixed(0)} km/h`);
+  assert.ok(full > 120 && full < 160, `top speed ${full.toFixed(0)} km/h is outside the real 5" quad range of 120-160`);
+  assert.ok(cruise < full, 'cruising must be slower than full throttle');
+  assert.ok(cruise > 60, `cruise speed ${cruise.toFixed(0)} km/h is too slow to race`);
+}
+
+console.log('\nall physics checks passed');

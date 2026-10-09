@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>FPV Sim</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; overflow:hidden; background:#0b1418;
+    font:13px/1.4 ui-monospace,Menlo,Consolas,monospace; color:#cfe6ef; }
+  canvas { display:block; width:100%; height:100%; }
+
+  #hud { position:fixed; inset:0; pointer-events:none; text-shadow:0 1px 3px #000a; }
+  .box { position:absolute; background:#0b1418aa; border:1px solid #ffffff18;
+         border-radius:6px; padding:6px 9px; }
+  #race { top:10px; left:10px; min-width:132px; }
+  #race b { color:#fff; font-size:15px; }
+  #lap { color:#7fd4ff; }
+  #delta { font-size:13px; margin-left:5px; display:none; }
+  #speed { top:62px; left:10px; }
+  #speed b { color:#fff; font-size:22px; }
+  #throttle { bottom:12px; left:10px; width:46px; height:132px; padding:5px; }
+  #thrBar { position:absolute; bottom:5px; left:5px; right:5px; height:100%;
+            background:#7fd4ff20; border-radius:3px; }
+  #thrFill { position:absolute; bottom:0; left:0; right:0; background:#7fd4ff; border-radius:3px; }
+  #thrMark { position:absolute; left:-2px; right:-2px; height:2px; background:#ff9f43; }
+  #horizon { position:fixed; left:50%; top:50%; width:132px; height:132px;
+             transform:translate(-50%,-50%); border:1px solid #ffffff30;
+             border-radius:50%; overflow:hidden; pointer-events:none; }
+  #hclip { position:absolute; left:-40%; top:-160%; width:180%; height:420%; }
+  #hline { position:absolute; top:50%; left:0; right:0; height:1px; background:#ffffff70; }
+  #cross { position:fixed; left:50%; top:50%; width:3px; height:3px; margin:-1.5px;
+           background:#7fd4ff; border-radius:50%; pointer-events:none; opacity:.8; }
+  #hint { bottom:12px; right:10px; text-align:right; color:#9fb8c2; }
+  #msg { position:fixed; left:50%; top:34%; transform:translateX(-50%);
+         font-size:26px; color:#ff6b5e; display:none; text-align:center; }
+  #fps { position:fixed; top:2px; left:50%; transform:translateX(-50%); color:#6f8a94; font-size:11px; }
+
+  /* settings */
+  #cfg { position:fixed; top:46px; right:10px; width:246px; background:#0b1418ee;
+         border:1px solid #ffffff18; border-radius:6px; padding:8px 10px; font-size:11px; }
+  #cfg[hidden] { display:none; }
+  #cfg h3 { font-size:11px; font-weight:600; letter-spacing:.1em; color:#7fd4ff; margin:0 0 5px; }
+  #cfg .grp { margin-bottom:8px; }
+  #cfg .btns { display:flex; gap:3px; flex-wrap:wrap; }
+  #cfg button { flex:1 1 auto; pointer-events:auto; cursor:pointer; font:inherit;
+    padding:3px 4px; background:#ffffff10; color:#cfe6ef; border:1px solid #ffffff1c;
+    border-radius:4px; white-space:nowrap; }
+  #cfg button:hover { background:#ffffff22; }
+  #cfg button[aria-pressed="true"] { background:#7fd4ff; color:#08222c; border-color:#7fd4ff; }
+  #cfg .axis { color:#9dff5e; margin:5px 0 1px; letter-spacing:.05em; }
+  #cfg label { display:flex; align-items:center; gap:6px; margin:1px 0; color:#9fb8c2; }
+  #cfg label span { flex:0 0 38px; }
+  #cfg label b { flex:0 0 34px; text-align:right; color:#7fd4ff; font-weight:400; }
+  #cfg input[type=range] { flex:1; min-width:0; accent-color:#7fd4ff; height:14px; }
+  #cfg .chk { margin:2px 0; color:#9fb8c2; cursor:pointer; }
+  #cfg svg { display:block; width:100%; height:64px; background:#ffffff08; border-radius:4px; }
+  #tabs { position:fixed; top:10px; right:10px; z-index:3; }
+  #tabs button { pointer-events:auto; cursor:pointer; padding:5px 10px;
+    background:#0b1418cc; color:#cfe6ef; border:1px solid #ffffff18; border-radius:6px;
+    font:12px ui-monospace,monospace; }
+  #pick { display:flex; gap:18px; flex-wrap:wrap; justify-content:center; margin:4px 0 2px; }
+  #pick fieldset { border:1px solid #ffffff18; border-radius:5px; padding:5px 8px 7px; }
+  #pick legend { font-size:10px; letter-spacing:.1em; color:#7fd4ff; padding:0 4px; }
+  #pick button { pointer-events:auto; cursor:pointer; padding:3px 7px; margin:2px;
+    background:#ffffff10; color:#cfe6ef; border:1px solid #ffffff1c; border-radius:4px;
+    font:11px ui-monospace,monospace; }
+  #pick button:hover { background:#ffffff22; }
+  #pick button[aria-pressed="true"] { background:#7fd4ff; color:#08222c; border-color:#7fd4ff; }
+
+  #start { position:fixed; inset:0; display:flex; flex-direction:column;
+           align-items:center; justify-content:center; gap:14px;
+           background:#0b1418ee; text-align:center; padding:24px; }
+  #start h1 { font-size:26px; letter-spacing:.22em; color:#fff; font-weight:600; }
+  #start table { border-collapse:collapse; font-size:13px; }
+  #start td { padding:3px 12px; }
+  #start td:first-child { color:#7fd4ff; text-align:right; }
+  #padName { color:#ff9f43; }
+  #go { pointer-events:auto; cursor:pointer; margin-top:6px; padding:9px 26px;
+        background:#7fd4ff; color:#08222c; border:0; border-radius:5px;
+        font:600 14px ui-monospace,monospace; }
+  #go:hover { background:#a6e3ff; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div class="box" id="race">Gate <b id="gate">1</b>/<span id="gates">–</span><span id="delta"></span><br><span id="lap">Lap 1</span></div>
+  <div class="box" id="speed"><b id="kmh">0</b> km/h<br><span id="alt">0.0</span> m</div>
+  <div class="box" id="throttle"><div id="thrBar"><div id="thrFill"></div><div id="thrMark"></div></div></div>
+  <div class="box" id="hint">L. stick ↑↓ throttle · ←→ yaw<br>R. stick roll + pitch<br>A — reset &nbsp; Y — flip &nbsp; Esc — pause &nbsp; Q — quality &nbsp; Tab — settings</div>
+  <div id="horizon"><div id="hclip"><div id="hline"></div></div></div>
+  <div id="cross"></div>
+  <div id="msg"></div>
+  <div id="fps"></div>
+</div>
+
+<button id="tabs">⚙</button>
+<div id="cfg" hidden>
+  <div class="grp">
+    <h3>LAYOUT</h3>
+    <div class="btns" id="layouts"></div>
+    <label class="chk"><input type="checkbox" id="cTrig"> throttle on RT trigger</label>
+    <label class="chk" title="stick centred = idle. On a radio the throttle stays as a lever."><input type="checkbox" id="cSpring"> spring throttle</label>
+    <label class="chk"><input type="checkbox" id="cInvTh"> invert throttle</label>
+    <label class="chk" title="you tilt, the drone keeps its altitude. Real quads do not fly like this."><input type="checkbox" id="cTilt"> tilt compensation</label>
+  </div>
+  <div class="grp">
+    <h3>RATES</h3>
+    <div class="btns" id="presets"></div>
+  </div>
+  <div class="grp">
+    <h3>SENSITIVITY</h3>
+    <label><span>×</span><input type="range" id="sens" min="0.3" max="1.5" step="0.05"><b id="sensVal">1.00</b></label>
+    <div class="btns"><button id="sensReset">reset ×1</button></div>
+  </div>
+  <div class="grp">
+    <h3>CAMERA</h3>
+    <label title="FPV camera tilt up from the airframe axis"><span>tilt</span><input type="range" id="camTilt" min="0" max="60" step="1"><b id="camTiltVal">25°</b></label>
+  </div>
+  <div class="grp" id="sliders"></div>
+  <svg id="curve" viewBox="0 0 100 40" preserveAspectRatio="none"></svg>
+</div>
+
+<div id="start">
+  <h1>FPV SIM</h1>
+  <div>Connect an Xbox controller and press the button</div>
+  <div id="padName">no controller found</div>
+  <table>
+    <tr><td>Left stick ↑↓</td><td>throttle</td></tr>
+    <tr><td>Left stick ←→</td><td>yaw</td></tr>
+    <tr><td>Right stick</td><td>roll and pitch</td></tr>
+    <tr><td>A</td><td>reset to start</td></tr>
+    <tr><td>Y</td><td>flip (recovery)</td></tr>
+    <tr><td>Esc</td><td>pause</td></tr>
+    <tr><td>keyboard</td><td>W/S throttle · A/D yaw · ←→ roll · ↑↓ pitch<br>(arrows act as the right stick, so ↑ = nose down)</td></tr>
+    <tr><td>keyboard</td><td>R reset · F flip · Esc pause · Q quality</td></tr>
+  </table>
+  <div id="pick"></div>
+  <button id="go">Start</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
