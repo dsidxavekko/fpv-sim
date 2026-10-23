@@ -1,6 +1,8 @@
 // Stick layouts and rate presets, saved to localStorage.
 // Rates use the Betaflight "Actual" model: [centre deg/s, max deg/s, expo 0..1].
 
+import { TRACK_IDS } from './tracks.js';
+
 const KEY = 'fpvsim.settings';
 
 /**
@@ -57,6 +59,12 @@ export const DEFAULTS = {
   springThrottle: false,  // stick centred = half gas, like a transmitter lever; on gives
                           // stick centred = idle, which is how a gamepad feels naturally
   tiltComp: true,
+  mode: 'acro',           // 'angle' levels the quad when the sticks are centred
+  sound: true,
+  track: 'loop',
+  wind: 0,                // 0..1, steady wind plus gusts
+  osd: 'full',            // 'full' | 'osd' (one line) | 'off'
+  battery: false,         // a pack that drains and sags; off by default so laps stay comparable
   camTilt: 25,            // deg, FPV camera looking up out of the airframe
 };
 
@@ -76,6 +84,12 @@ export function loadSettings() {
     s.invertThrottle = !!raw.invertThrottle;
     s.springThrottle = raw.springThrottle ?? s.springThrottle;
     s.tiltComp = raw.tiltComp ?? s.tiltComp;
+    if (raw.mode === 'acro' || raw.mode === 'angle') s.mode = raw.mode;
+    s.sound = raw.sound ?? s.sound;
+    if (TRACK_IDS.includes(raw.track)) s.track = raw.track;
+    s.battery = !!raw.battery;
+    s.wind = clamp(+raw.wind || 0, 0, 1);
+    if (['full', 'osd', 'off'].includes(raw.osd)) s.osd = raw.osd;
     s.camTilt = clamp(+raw.camTilt || s.camTilt, 0, 60);
     return s;
   } catch {

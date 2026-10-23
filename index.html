@@ -32,6 +32,21 @@
   #hline { position:absolute; top:50%; left:0; right:0; height:1px; background:#ffffff70; }
   #cross { position:fixed; left:50%; top:50%; width:3px; height:3px; margin:-1.5px;
            background:#7fd4ff; border-radius:50%; pointer-events:none; opacity:.8; }
+  #batt { top:62px; left:132px; min-width:70px; display:none; }
+  #batt b { color:#fff; font-weight:400; }
+  #battBar { height:5px; margin-top:3px; background:#ffffff20; border-radius:3px; overflow:hidden; }
+  #battFill { height:100%; width:100%; background:#9dff5e; }
+  #board { font-size:11px; color:#9fb8c2; }
+  #board div { display:flex; gap:8px; }
+  #board span { flex:0 0 14px; color:#6f8a94; }
+  #board b { color:#cfe6ef; font-weight:400; }
+  #board .new b, #board .new span { color:#9dff5e; }
+  #board .none { color:#6f8a94; }
+  #osd { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); display:none;
+         font-size:15px; letter-spacing:.06em; color:#fff; white-space:nowrap; }
+  #hud[data-osd="osd"] .box, #hud[data-osd="off"] .box, #hud[data-osd="off"] #horizon,
+  #hud[data-osd="osd"] #horizon, #hud[data-osd="off"] #fps, #hud[data-osd="osd"] #fps { display:none !important; }
+  #hud[data-osd="osd"] #osd { display:block; }
   #hint { bottom:12px; right:10px; text-align:right; color:#9fb8c2; }
   #msg { position:fixed; left:50%; top:34%; transform:translateX(-50%);
          font-size:26px; color:#ff6b5e; display:none; text-align:center; }
@@ -84,13 +99,15 @@
 </style>
 </head>
 <body>
-<div id="hud">
+<div id="hud" data-osd="full">
   <div class="box" id="race">Gate <b id="gate">1</b>/<span id="gates">–</span><span id="delta"></span><br><span id="lap">Lap 1</span></div>
   <div class="box" id="speed"><b id="kmh">0</b> km/h<br><span id="alt">0.0</span> m</div>
+  <div class="box" id="batt"><b>100%</b><div id="battBar"><div id="battFill"></div></div></div>
   <div class="box" id="throttle"><div id="thrBar"><div id="thrFill"></div><div id="thrMark"></div></div></div>
-  <div class="box" id="hint">L. stick ↑↓ throttle · ←→ yaw<br>R. stick roll + pitch<br>A — reset &nbsp; Y — flip &nbsp; Esc — pause &nbsp; Q — quality &nbsp; Tab — settings</div>
+  <div class="box" id="hint">L. stick ↑↓ throttle · ←→ yaw<br>R. stick roll + pitch<br>A — reset &nbsp; Y — flip &nbsp; Esc — pause &nbsp; Q — quality &nbsp; M — angle/acro &nbsp; N — sound &nbsp; O — HUD &nbsp; Tab — settings</div>
   <div id="horizon"><div id="hclip"><div id="hline"></div></div></div>
   <div id="cross"></div>
+  <div id="osd"></div>
   <div id="msg"></div>
   <div id="fps"></div>
 </div>
@@ -104,6 +121,24 @@
     <label class="chk" title="stick centred = idle. On a radio the throttle stays as a lever."><input type="checkbox" id="cSpring"> spring throttle</label>
     <label class="chk"><input type="checkbox" id="cInvTh"> invert throttle</label>
     <label class="chk" title="you tilt, the drone keeps its altitude. Real quads do not fly like this."><input type="checkbox" id="cTilt"> tilt compensation</label>
+  </div>
+  <div class="grp">
+    <h3>TRACK</h3>
+    <div class="btns" id="tracks"></div>
+    <h3 style="margin-top:6px">BEST LAPS</h3>
+    <div id="board"></div>
+  </div>
+  <div class="grp">
+    <h3>FLIGHT MODE <span style="color:#6f8a94">(M)</span></h3>
+    <div class="btns" id="modes"></div>
+    <label class="chk" title="N toggles"><input type="checkbox" id="cSound"> motor sound</label>
+    <label class="chk" title="the pack drains and sags; empty means you drop"><input type="checkbox" id="cBatt"> battery</label>
+  </div>
+  <div class="grp">
+    <h3>WIND</h3>
+    <label title="steady wind plus gusts; the quad has no position hold"><span>speed</span><input type="range" id="wind" min="0" max="1" step="0.05"><b id="windVal">0</b></label>
+    <h3 style="margin-top:6px">HUD <span style="color:#6f8a94">(O)</span></h3>
+    <div class="btns" id="osdModes"></div>
   </div>
   <div class="grp">
     <h3>RATES</h3>
@@ -134,7 +169,7 @@
     <tr><td>Y</td><td>flip (recovery)</td></tr>
     <tr><td>Esc</td><td>pause</td></tr>
     <tr><td>keyboard</td><td>W/S throttle · A/D yaw · ←→ roll · ↑↓ pitch<br>(arrows act as the right stick, so ↑ = nose down)</td></tr>
-    <tr><td>keyboard</td><td>R reset · F flip · Esc pause · Q quality</td></tr>
+    <tr><td>keyboard</td><td>R reset · F flip · M angle/acro · N sound · Esc pause · Q quality</td></tr>
   </table>
   <div id="pick"></div>
   <button id="go">Start</button>

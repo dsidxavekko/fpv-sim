@@ -18,14 +18,14 @@ pre{margin:0}#verdict{font-weight:700;margin-top:10px}</style>
 <script type="module">
 import * as THREE from 'three';
 import { createWorld } from '../src/world.js';
+import { TRACK_IDS } from '../src/tracks.js';
 
 const out = document.getElementById('out');
 const verdict = document.getElementById('verdict');
 const lines = [];
 const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
 
-const world = createWorld(new THREE.Scene());
-const R = world.droneRadius;
+const R = createWorld(new THREE.Scene()).droneRadius;
 const _v = new THREE.Vector3(), _iq = new THREE.Quaternion();
 
 /** Signed distance from the drone to one bar, in gate-local space: >0 outside, <0 inside. */
@@ -46,7 +46,10 @@ const buried = (p, g) => Math.min(...g.boxes.map((b) => barGap(p, g, b)));
 // used to drop it: _v left in world space between bars, the "nearest face" metric
 // picking the far end of a metres-long bar, and the exit path zeroing the two
 // coordinates it should have kept.
-let contacts = 0, stillBuried = 0, overburden = 0, worst = 0;
+let contacts = 0, stillBuried = 0, overburden = 0, worst = 0, gateCount = 0;
+for (const id of TRACK_IDS) {
+const world = createWorld(new THREE.Scene(), id);
+gateCount += world.gates.length;
 for (const g of world.gates) {
   for (let lx = -2; lx <= 2; lx += 0.05) {
     for (let ly = -2; ly <= 2; ly += 0.05) {
@@ -61,9 +64,10 @@ for (const g of world.gates) {
     }
   }
 }
+}
 
 const avg = overburden / contacts;
-log(`drone radius ${R} m, ${contacts} contact positions swept over ${world.gates.length} gates`);
+log(`drone radius ${R} m, ${contacts} contact positions swept over ${gateCount} gates on ${TRACK_IDS.length} tracks`);
 log(`left inside a bar: ${stillBuried} (${(stillBuried / contacts * 100).toFixed(3)}%),` +
     ` mean ${(avg * 1000).toFixed(3)} mm, worst ${(worst * 1000).toFixed(1)} mm`);
 

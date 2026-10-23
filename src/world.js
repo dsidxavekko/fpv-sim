@@ -2,11 +2,11 @@
 // single InstancedMesh (one draw call). No textures, no shadows, no assets.
 
 import * as THREE from 'three';
+import { TRACKS } from './tracks.js';
 
 const OPENING = 3.0;   // m, clear opening of a gate
 const BAR = 0.25;       // m, frame thickness
 const DEPTH = 0.35;     // m, frame depth
-const COUNT = 20;
 const DRONE_R = 0.22;  // m, collision radius
 const GROUND_Y = 0;
 
@@ -23,33 +23,28 @@ const box = (cx, cy, cz, hx, hy, hz) => ({
   h: new THREE.Vector3(hx, hy, hz),
 });
 
-/** Point on the gate path. Radius and height both wander, so the loop is not a circle. */
-function pathPoint(a) {
-  const r = 55 + 18 * Math.sin(3 * a + 0.7);
-  // stay clear of the ground: the lowest gate centre still leaves room for legs
-  const y = Math.max(4.5, 7 + 5 * Math.sin(2 * a) + 3 * Math.sin(5 * a));
-  return new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a));
-}
-
 /** Gate pose for index i: position plus the tangent pointing through the gate. */
-function gatePose(i) {
-  const a = (i / COUNT) * Math.PI * 2;
-  const pos = pathPoint(a);
+function gatePose(track, i) {
+  const at = (a) => { const p = track.path(a); return new THREE.Vector3(p.x, p.y, p.z); };
+  const a = (i / track.count) * Math.PI * 2;
+  const pos = at(a);
 
   // tangent by central difference: stays correct even where the height is clamped
   const e = 0.01;
-  const fwd = pathPoint(a + e).sub(pathPoint(a - e)).normalize();
+  const fwd = at(a + e).sub(at(a - e)).normalize();
 
   // local -Z looks through the gate, so map (0,0,-1) -> fwd
   const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), fwd);
   return { pos, quat, fwd };
 }
 
-export function createWorld(scene) {
+export function createWorld(scene, trackId = 'loop') {
+  const track = TRACKS[trackId] ?? TRACKS.loop;
+  const COUNT = track.count;
   const gates = [];
 
   for (let i = 0; i < COUNT; i++) {
-    const { pos, quat, fwd } = gatePose(i);
+    const { pos, quat, fwd } = gatePose(track, i);
     const h = OPENING / 2;                    // half of the clear opening
     const o = h + BAR / 2;                    // bar centre line
     const outer = h + BAR;                    // outer half-size of the frame

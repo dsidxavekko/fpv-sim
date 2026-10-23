@@ -19,7 +19,14 @@ const KEY_ROLL = { ArrowRight: 1, ArrowLeft: -1 };
 const sum = (keys, map) =>
   Object.entries(map).reduce((n, [code, dir]) => n + (keys.has(code) ? dir : 0), 0);
 
-const AXIS_INDEX = { lx: 0, ly: 1, rx: 2, ry: 3 };
+/**
+ * Throttle lever. `active` means the control is off its dead zone right now. A
+ * spring throttle always follows the stick; a lever only takes a new value while
+ * the pilot is moving it, and a centred or drifting stick leaves it where it was.
+ */
+export function nextLever(lever, value, active, spring) {
+  return spring || active ? value : lever;
+}
 
 /**
  * Stick layouts: pitch, roll, yaw come straight from the pad every frame. Throttle is
@@ -66,6 +73,7 @@ export function createInput(settings, initialThrottle = 0.5) {
     }
 
     let throttle = null;
+    let active = false;
     let pitch = 0, roll = 0, yaw = 0;
 
     // every RC layout is just a permutation of the four stick axes
@@ -82,28 +90,19 @@ export function createInput(settings, initialThrottle = 0.5) {
       // spring: centred is idle, pushing forward adds gas, pulling back does nothing.
       // The lever maps the whole travel so centre sits at half gas.
       const axis = raw[m.throttle] * sign(m.throttle);
-      if (settings.throttleOnTrigger) throttle = dz(pad.buttons[7]?.value ?? 0, 0.02);
-      else if (settings.springThrottle) throttle = Math.max(0, -axis);
-      else throttle = (1 - axis) / 2;
+      if (settings.throttleOnTrigger) {
+        throttle = dz(pad.buttons[7]?.value ?? 0, 0.02);
+        active = throttle !== 0;
+      } else {
+        throttle = settings.springThrottle ? Math.max(0, -axis) : (1 - axis) / 2;
+        // judged on the same dead zone that shaped the value, otherwise a drifting
+        // stick reads as "moved" while the value says "centred" and resets gas to 50 %
+        active = raw[m.throttle] !== 0;
+      }
     }
 
-    // Spring throttle follows the stick exactly, so releasing it cuts power.
-    // The lever is the same mapping but only updates while the pilot is actively
-    // off centre; a centred stick holds whatever was last set, the way a real
-    // transmitter behaves. Both read the same stick value, the spring flag
-    // decides whether centring resets gas to idle.
-    if (throttle !== null) {
-      // Ask the same source the value came from: a centred stick must not veto a
-      // trigger read, or throttleOnTrigger with the lever off silently does nothing.
-      const src = settings.throttleOnTrigger
-        ? (pad.buttons[7]?.value ?? 0)
-        : (pad.axes[AXIS_INDEX[m.throttle]] ?? 0);
-      // spring: always track the input. lever: track it too, but hands off centre
-      // means the previous setting stays.
-      if (settings.springThrottle || Math.abs(src) > 0.02) lever = throttle;
-    } else {
-      lever += sum(keys, KEY_THROTTLE) * dt * 0.7; // keyboard nudge
-    }
+    if (throttle !== null) lever = nextLever(lever, throttle, active, settings.springThrottle);
+    else lever += sum(keys, KEY_THROTTLE) * dt * 0.7; // keyboard nudge
     lever = Math.min(1, Math.max(0, lever));
     s.throttle = settings.invertThrottle ? 1 - lever : lever;
 

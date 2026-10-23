@@ -1,7 +1,11 @@
 import * as THREE from 'three';
-import { CFG, createDrone, resetDrone, step, startFlip, hoverThrottle, toWorld, actualRate } from './physics.js';
+import { CFG, createDrone, resetDrone, step, startFlip, hoverThrottle, actualRate, attitude } from './physics.js';
 import { createInput } from './input.js';
 import { createWorld } from './world.js';
+import { createGhost } from './ghost.js';
+import { createAudio } from './audio.js';
+import { createRecords } from './records.js';
+import { TRACKS, TRACK_IDS } from './tracks.js';
 import { LAYOUTS, PRESETS, loadSettings, saveSettings, applyPreset } from './settings.js';
 
 // ---------------------------------------------------------------- renderer
@@ -30,20 +34,16 @@ const rig = new THREE.Object3D();
 rig.add(camera);
 scene.add(rig);
 
-const world = createWorld(scene);
+const world = createWorld(scene, settings.track);
 const drone = createDrone();
 const input = createInput(settings, hoverThrottle());   // the lever starts trimmed for hover
 
 // ---------------------------------------------------------------- ghost
-// The lap is sampled at GHOST_HZ and only kept when it beats the best time, so what
-// you see is always the lap you are trying to copy. The splits (ms per gate) are
-// what the live delta compares: at the same gate, your time against the ghost's.
-const GHOST_HZ = 20;
-const GHOST_KEY = 'fpvsim.ghost';
-let lapSamples = [];      // x,y,z triples of the lap in progress
-let splits = [];          // ms at each gate of the lap in progress
-let sampleAcc = 0;
-let ghost = loadGhost();
+// Sampling, record keeping and playback live in ghost.js. What you see is always the
+// lap you are trying to copy, and it switches to your new record the moment you set it.
+const ghost = createGhost(localStorage, 20, settings.track);
+const records = createRecords(localStorage, settings.track);
+const _gp = {};
 
 const ghostMesh = new THREE.Mesh(
   new THREE.BoxGeometry(0.36, 0.10, 0.36),
@@ -52,53 +52,22 @@ const ghostMesh = new THREE.Mesh(
 ghostMesh.visible = false;
 scene.add(ghostMesh);
 
-function loadGhost() {
-  try {
-    const r = JSON.parse(localStorage.getItem(GHOST_KEY));
-    return r && Array.isArray(r.splits) && r.s.length > 5 && r.s.length % 3 === 0 ? r : null;
-  } catch { return null; }
-}
-
-function saveGhost() {
-  try {
-    // 1 cm is well inside the drone radius and keeps the stored lap small
-    localStorage.setItem(GHOST_KEY, JSON.stringify({
-      t: best, splits: [...splits],
-      s: lapSamples.map((n) => Math.round(n * 100) / 100),
-    }));
-  } catch { /* out of quota: the lap still counts, there is just no ghost */ }
-}
-
-/** Put the ghost where it was at elapsed `ms`, or hide it once it has finished. */
-function playGhost(ms) {
-  const n = ghost.s.length / 3;
-  const f = (ms / 1000) * GHOST_HZ;
-  const i = Math.floor(f);
-  if (i >= n - 1) { ghostMesh.visible = false; return; }
-  const a = i * 3, b = a + 3, u = f - i;
-  ghostMesh.position.set(
-    ghost.s[a] + (ghost.s[b] - ghost.s[a]) * u,
-    ghost.s[a + 1] + (ghost.s[b + 1] - ghost.s[a + 1]) * u,
-    ghost.s[a + 2] + (ghost.s[b + 2] - ghost.s[a + 2]) * u,
-  );
-  ghostMesh.visible = true;
-}
+const audio = createAudio();
 
 // ---------------------------------------------------------------- race state
 // The lap clock is accumulated from dt rather than read off performance.now(), so
 // pausing simply stops it counting instead of charging you for the break.
-const BEST_KEY = 'fpvsim.best';
-let next = 0, lap = 1, lapMs = 0, best = Number(localStorage.getItem(BEST_KEY)) || Infinity, paused = false;
+let next = 0, lap = 1, lapMs = 0, crashes = 0, touching = false, paused = false;
 
 function startRace() {
   next = 0;
   lap = 1;
   lapMs = 0;
-  lapSamples.length = 0;
-  splits.length = 0;
+  crashes = 0;
   for (const g of world.gates) g.sign = -1;
   world.highlight(next);
   place();
+  ghost.startLap(drone.p.x, drone.p.y, drone.p.z);
 }
 // body forward is -Z, so yaw must point -Z along the track direction
 function place() {
@@ -116,7 +85,7 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   gate: $('gate'), gates: $('gates'), lap: $('lap'), kmh: $('kmh'), alt: $('alt'),
   thrFill: $('thrFill'), thrMark: $('thrMark'), hclip: $('hclip'), delta: $('delta'),
-  msg: $('msg'), fps: $('fps'), start: $('start'), padName: $('padName'),
+  msg: $('msg'), fps: $('fps'), batt: $('batt'), osd: $('osd'), battFill: $('battFill'), board: $('board'), start: $('start'), padName: $('padName'),
 };
 ui.gates.textContent = world.count;
 ui.thrMark.style.bottom = `${(hoverThrottle() * 100).toFixed(0)}%`;   // hover throttle marker
@@ -259,6 +228,54 @@ const refreshCam = () => {
 camRange.oninput = () => { settings.camTilt = +camRange.value; refreshCam(); saveSettings(settings); };
 refreshCam();
 
+/** Top laps for the current track; `mark` is the rank to highlight after a lap. */
+function drawBoard(mark = -1) {
+  const rows = records.list();
+  ui.board.innerHTML = rows.length
+    ? rows.map((t, i) => `<div${i === mark ? ' class="new"' : ''}><span>${i + 1}</span><b>${fmt(t)}</b></div>`).join('')
+    : '<div class="none">no laps yet</div>';
+}
+drawBoard();
+
+// switching the track rebuilds the world, which is simplest done by reloading
+buttonGroup($('tracks'),
+  TRACK_IDS.map((id) => ({ id, label: TRACKS[id].name, title: `${TRACKS[id].count} gates` })),
+  () => settings.track, (id) => { if (id !== settings.track) { settings.track = id; saveSettings(settings); location.reload(); } });
+
+$('cBatt').checked = settings.battery;
+$('cBatt').onchange = (e) => {
+  settings.battery = e.target.checked;
+  saveSettings(settings);
+  ui.batt.style.display = settings.battery ? 'block' : 'none';
+};
+ui.batt.style.display = settings.battery ? 'block' : 'none';
+
+const windRange = $('wind'), windVal = $('windVal');
+const refreshWind = () => {
+  windRange.value = settings.wind;
+  windVal.textContent = settings.wind ? `${(settings.wind * CFG.windMax).toFixed(0)} m/s` : 'calm';
+};
+windRange.oninput = () => { settings.wind = +windRange.value; refreshWind(); saveSettings(settings); };
+refreshWind();
+
+// HUD: everything / one line at the bottom like a real OSD / nothing but the crosshair
+const OSD_MODES = ['full', 'osd', 'off'];
+const applyOsd = () => { $('hud').dataset.osd = settings.osd; };
+const refreshOsd = buttonGroup($('osdModes'),
+  [{ id: 'full', label: 'full' }, { id: 'osd', label: 'OSD line' }, { id: 'off', label: 'off' }],
+  () => settings.osd, (id) => { settings.osd = id; applyOsd(); });
+applyOsd();
+
+const refreshMode = buttonGroup($('modes'), [
+  { id: 'acro', label: 'Acro', title: 'sticks command rotation rate, no self-levelling' },
+  { id: 'angle', label: 'Angle', title: 'sticks command tilt, the quad levels itself when you let go' },
+], () => settings.mode, (id) => { settings.mode = id; });
+refreshPicks.push(refreshMode);
+
+$('cSound').checked = settings.sound;
+audio.setEnabled(settings.sound);
+$('cSound').onchange = (e) => { settings.sound = e.target.checked; audio.setEnabled(settings.sound); saveSettings(settings); };
+
 $('cTrig').checked = settings.throttleOnTrigger;
 $('cInvTh').checked = settings.invertThrottle;
 $('cSpring').checked = settings.springThrottle;
@@ -304,7 +321,8 @@ let fpsAcc = 0, fpsN = 0, padShown = '';
 
 function frame(now) {
   requestAnimationFrame(frame);
-  const dt = Math.min(0.1, (now - last) / 1000);
+  // 50 ms caps a frame at 24 physics steps, so a slow frame cannot snowball
+  const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
 
   input.update(dt);
@@ -321,12 +339,19 @@ function frame(now) {
     const cmd = { throttle: input.throttle, pitch: input.pitch, roll: input.roll, yaw: input.yaw };
     while (acc >= CFG.dt) {
       acc -= CFG.dt;
+      const impact = Math.hypot(drone.v.x, drone.v.y, drone.v.z);
       step(drone, cmd, CFG.dt, settings.rates, settings);
 
       // collide() works on THREE vectors, then we copy the resolution back
       _vp.set(drone.p.x, drone.p.y, drone.p.z);
       _vv.set(drone.v.x, drone.v.y, drone.v.z);
-      if (world.collide(_vp, _vv)) {
+      const contact = world.collide(_vp, _vv);
+      if (contact && !touching && impact > 5) {     // a landing is not a crash
+        crashes++;
+        audio.crash(impact / 10);
+      }
+      touching = contact;
+      if (contact) {
         drone.crashed = true;
         drone.p.x = _vp.x; drone.p.y = _vp.y; drone.p.z = _vp.z;
         drone.v.x = _vv.x; drone.v.y = _vv.y; drone.v.z = _vv.z;
@@ -334,36 +359,34 @@ function frame(now) {
 
       const hit = world.checkPass(drone.p);
       if (hit === next) {
-        splits[next] = lapMs;
-        const d = ghost && ghost.splits[next] != null ? lapMs - ghost.splits[next] : null;
+        const d = ghost.split(next, lapMs);
         next++;
         if (next >= world.count) {
           const t = lapMs;
-          if (t < best) {                           // keep the ghost only when it wins
-            best = t;
-            try { localStorage.setItem(BEST_KEY, String(best)); } catch { /* ignore */ }
-            saveGhost();
-          }
+          const record = ghost.finishLap(t);        // keeps the ghost only when it wins
+          const rank = records.add(t);
+          drawBoard(rank);
           next = 0;
           lap++;
           lapMs = 0;
-          lapSamples.length = 0;
-          splits.length = 0;
-          sampleAcc = 0;
-          message(`Lap ${lap - 1}: ${fmt(t)}  •  best ${fmt(best)}`);
+          crashes = 0;
+          ghost.startLap(drone.p.x, drone.p.y, drone.p.z);
+          message(`Lap ${lap - 1}: ${fmt(t)}${record ? '  •  NEW RECORD' : rank >= 0 ? `  •  #${rank + 1} best` : `  •  best ${fmt(ghost.best)}`}`);
           setTimeout(() => message(''), 2500);
         }
         world.highlight(next);
         showDelta(d);
       }
     }
-    sampleAcc += dt;
-    if (sampleAcc >= 1 / GHOST_HZ) {
-      sampleAcc -= 1 / GHOST_HZ;
-      lapSamples.push(drone.p.x, drone.p.y, drone.p.z);
+    ghost.sample(dt, drone.p.x, drone.p.y, drone.p.z);
+    if (ghost.positionAt(lapMs, _gp)) {
+      ghostMesh.position.set(_gp.x, _gp.y, _gp.z);
+      ghostMesh.visible = true;
+    } else {
+      ghostMesh.visible = false;
     }
-    if (ghost) playGhost(lapMs);
   }
+  audio.update((drone.m[0] + drone.m[1] + drone.m[2] + drone.m[3]) / 4, paused);
 
   // ---- camera + HUD ----
   rig.position.set(drone.p.x, drone.p.y, drone.p.z);
@@ -371,12 +394,30 @@ function frame(now) {
 
   const speed = Math.hypot(drone.v.x, drone.v.y, drone.v.z);
   ui.gate.textContent = next + 1;
-  ui.lap.textContent = `Lap ${lap} · ${fmt(lapMs)}${best < Infinity ? ` · best ${fmt(best)}` : ''}`;
+  ui.lap.textContent = `Lap ${lap} · ${fmt(lapMs)}${ghost.best < Infinity ? ` · best ${fmt(ghost.best)}` : ''}${crashes ? ` · ✖${crashes}` : ''}`;
   ui.kmh.textContent = Math.round(speed * 3.6);
   ui.alt.textContent = drone.p.y.toFixed(1);
+  if (settings.battery) {
+    const c = drone.charge;
+    ui.battFill.style.width = `${(c * 100).toFixed(0)}%`;
+    ui.battFill.style.background = c > 0.25 ? '#9dff5e' : c > 0.1 ? '#ffb347' : '#ff6b5e';
+    ui.batt.firstElementChild.textContent = `${(c * 100).toFixed(0)}%`;
+    if (c <= 0 && !paused) message('Battery empty — press A to reset');
+  }
+  if (settings.osd === 'osd') {
+    ui.osd.textContent = [
+      settings.mode === 'angle' ? 'ANGLE' : 'ACRO',
+      `THR ${(input.throttle * 100).toFixed(0)}%`,
+      `${Math.round(speed * 3.6)} km/h`,
+      `${drone.p.y.toFixed(0)} m`,
+      fmt(lapMs),
+      `G ${next + 1}/${world.count}`,
+      ...(settings.battery ? [`BAT ${(drone.charge * 100).toFixed(0)}%`] : []),
+    ].join('   ');
+  }
   ui.thrFill.style.height = `${(input.throttle * 100).toFixed(0)}%`;
 
-  const { pitch, roll } = attitude(drone);
+  const { pitch, roll } = attitude(drone.q);
   ui.hclip.style.transform =
     `rotate(${(-roll * 180 / Math.PI).toFixed(1)}deg) translateY(${(pitch * 240).toFixed(1)}px)`;
 
@@ -395,22 +436,12 @@ function frame(now) {
   }
 }
 
-function attitude(d) {
-  const f = toWorld(d.q, { x: 0, y: 0, z: -1 });
-  const r = toWorld(d.q, { x: 1, y: 0, z: 0 });
-  const u = toWorld(d.q, { x: 0, y: 1, z: 0 });
-  return {
-    pitch: Math.asin(Math.max(-1, Math.min(1, f.y))),
-    roll: -Math.atan2(r.y, u.y),
-  };
-}
-
 function togglePause() {
   paused = !paused;
   message(paused ? 'Paused — Esc' : '');
 }
 
-const dismissStart = () => { ui.start.style.display = 'none'; };
+const dismissStart = () => { ui.start.style.display = 'none'; audio.resume(); };
 $('go').addEventListener('click', dismissStart);
 addEventListener('keydown', dismissStart);
 addEventListener('gamepadconnected', dismissStart);
@@ -425,6 +456,33 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   applyQuality();
+});
+
+// M switches Acro / Angle, N mutes the engine
+addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.code === 'KeyM') {
+    settings.mode = settings.mode === 'acro' ? 'angle' : 'acro';
+    saveSettings(settings);
+    refreshMode();
+    message(`${settings.mode === 'angle' ? 'Angle' : 'Acro'} mode`);
+    setTimeout(() => { if (!paused) message(''); }, 1200);
+  }
+  if (e.code === 'KeyN') {
+    settings.sound = !settings.sound;
+    audio.setEnabled(settings.sound);
+    $('cSound').checked = settings.sound;
+    saveSettings(settings);
+  }
+});
+
+// O cycles the HUD
+addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyO' || e.repeat) return;
+  settings.osd = OSD_MODES[(OSD_MODES.indexOf(settings.osd) + 1) % OSD_MODES.length];
+  applyOsd();
+  refreshOsd();
+  saveSettings(settings);
 });
 
 // Q cycles the render scale manually when auto-quality is not enough

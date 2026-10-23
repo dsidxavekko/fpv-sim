@@ -1,17 +1,20 @@
 # Contributing
 
-No build step and no dependencies — the whole simulator is `index.html` plus five ES
+No build step and no dependencies — the whole simulator is `index.html` plus nine ES
 modules in `src/`. Open it and it runs.
 
 ## Before you push
 
 ```sh
 node test/rates.test.mjs     # rate curve + mapping of all 4 layouts
-node test/physics.test.mjs   # hover, freefall, roll ramp, flip, 60 s of random input
+node test/physics.test.mjs   # hover, freefall, roll ramp, flip, angle mode, 60 s of random input
+node test/ghost.test.mjs
+node test/input.test.mjs
+node test/tracks.test.mjs
 python3 -m http.server 8000  # then open http://localhost:8000/test/collide.html
 ```
 
-Both node tests print `all … checks passed` or throw. The collision sweep needs a
+The node tests print `all … checks passed` or throw. The collision sweep needs a
 browser, because `world.js` imports three, which node does not resolve.
 
 ## Style

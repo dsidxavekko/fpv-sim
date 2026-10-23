@@ -1,6 +1,6 @@
 // node test/physics.test.mjs
 import assert from 'node:assert/strict';
-import { CFG, createDrone, resetDrone, run, step, hoverThrottle, startFlip, rateFor, mixer } from '../src/physics.js';
+import { CFG, createDrone, resetDrone, run, step, hoverThrottle, startFlip, rateFor, mixer, attitude, batteryScale, windAt } from '../src/physics.js';
 import { DEFAULTS } from '../src/settings.js';
 
 const hover = hoverThrottle();
@@ -157,6 +157,79 @@ function clamp1(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
   assert.ok(full > 120 && full < 160, `top speed ${full.toFixed(0)} km/h is outside the real 5" quad range of 120-160`);
   assert.ok(cruise < full, 'cruising must be slower than full throttle');
   assert.ok(cruise > 60, `cruise speed ${cruise.toFixed(0)} km/h is too slow to race`);
+}
+
+// angle mode: released sticks level the quad, full stick holds angleMax
+{
+  const opts = { tiltComp: true, mode: 'angle' };
+  const idle = { throttle: hover, pitch: 0, roll: 0, yaw: 0 };
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 20, z: 0 });
+  // start tipped 40 deg over and tumbling
+  const phi = 40 * Math.PI / 180;
+  d.q = { x: 0, y: 0, z: Math.sin(phi / 2), w: Math.cos(phi / 2) };
+  run(d, idle, 2, DEFAULTS.rates, opts);
+  const level = attitude(d.q);
+  console.log(`angle mode: 40 deg tipped, 2 s later roll = ${(level.roll * 180 / Math.PI).toFixed(1)} pitch = ${(level.pitch * 180 / Math.PI).toFixed(1)}`);
+  assert.ok(Math.abs(level.roll) < 0.05 && Math.abs(level.pitch) < 0.05, 'angle mode did not level the quad');
+
+  run(d, { ...idle, roll: 1 }, 2, DEFAULTS.rates, opts);
+  const held = attitude(d.q).roll * 180 / Math.PI;
+  console.log(`angle mode: full right stick holds ${held.toFixed(1)} deg (limit ${CFG.angleMax})`);
+  assert.ok(Math.abs(held - CFG.angleMax) < 4, `held ${held.toFixed(1)} deg, wanted ${CFG.angleMax}`);
+
+  run(d, { ...idle, pitch: -1 }, 1.5, DEFAULTS.rates, opts);
+  assert.ok(attitude(d.q).pitch < -0.5, 'nose-down stick did not pitch the nose down');
+
+  // a flip still works in angle mode
+  resetDrone(d, { x: 0, y: 30, z: 0 });
+  startFlip(d, 1);
+  run(d, idle, 1.5, DEFAULTS.rates, opts);
+  assert.ok(d.flip.done, 'flip never finished in angle mode');
+}
+
+// battery: hover lasts minutes, then the pack sags until the quad can no longer hold up
+{
+  const opts = { tiltComp: true, battery: true };
+  const idle = { throttle: hover, pitch: 0, roll: 0, yaw: 0 };
+  const d = createDrone();
+  resetDrone(d, { x: 0, y: 500, z: 0 });
+  run(d, idle, 60, DEFAULTS.rates, opts);
+  console.log(`battery: ${(d.charge * 100).toFixed(0)}% after 60 s of hover`);
+  assert.ok(d.charge < 0.95 && d.charge > 0.7, `hover should use ~25% a minute, left ${d.charge}`);
+  assert.ok(batteryScale(1) === 1 && batteryScale(0) < 0.3, 'sag curve endpoints');
+
+  // flat pack, throttle held at the hover point it used to have: it must sink
+  d.charge = 0;
+  const y0 = d.p.y;
+  run(d, idle, 3, DEFAULTS.rates, opts);
+  assert.ok(d.p.y < y0 - 5, 'an empty pack should not hold altitude');
+
+  // default (battery off) never drains
+  const e = createDrone();
+  resetDrone(e, { x: 0, y: 500, z: 0 });
+  run(e, idle, 30, DEFAULTS.rates, {});
+  assert.equal(e.charge, 1);
+}
+
+// wind: zero is exactly calm, deterministic, bounded; a hovering quad drifts downwind
+{
+  assert.deepEqual(windAt(5, 0), { x: 0, y: 0, z: 0 });
+  assert.deepEqual(windAt(12.3, 0.5), windAt(12.3, 0.5));
+  for (let t = 0; t < 300; t += 0.37) {
+    const w = windAt(t, 1);
+    assert.ok(Math.hypot(w.x, w.z) < CFG.windMax * 1.2 + 1e-9, 'gust above the cap');
+  }
+  const idle = { throttle: hover, pitch: 0, roll: 0, yaw: 0 };
+  const calm = createDrone(), windy = createDrone();
+  resetDrone(calm, { x: 0, y: 100, z: 0 });
+  resetDrone(windy, { x: 0, y: 100, z: 0 });
+  run(calm, idle, 10, DEFAULTS.rates, {});
+  run(windy, idle, 10, DEFAULTS.rates, { wind: 1 });
+  const drift = Math.hypot(windy.p.x, windy.p.z);
+  console.log(`wind: 10 s hover drifted ${drift.toFixed(1)} m (calm: ${Math.hypot(calm.p.x, calm.p.z).toFixed(2)} m)`);
+  assert.ok(Math.hypot(calm.p.x, calm.p.z) < 0.01, 'calm air must not move a hovering quad');
+  assert.ok(drift > 2, 'wind should carry a hovering quad');
 }
 
 console.log('\nall physics checks passed');

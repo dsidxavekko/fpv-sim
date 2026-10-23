@@ -55,9 +55,46 @@ need rewriting. Flips ignore it — a flip is always full power.
 | Start / Esc | pause |
 | Tab | settings panel |
 | Q | render scale by hand |
+| M | switch Acro / Angle |
+| N | motor sound on / off |
+| O | cycle HUD: full / OSD line / off |
 
 Keyboard: `W/S` throttle, `A/D` yaw, arrow keys roll and pitch, `R` reset, `F` flip.
 The arrows mirror the right stick, so `↑` is nose down.
+
+## Flight modes
+
+**Acro** (default): the stick commands a rotation rate, no self-levelling.
+**Angle**: the stick commands a tilt (up to 55°) and the quad levels itself when you let
+go. An outer P loop turns the tilt error into the rate setpoint the same PID already
+tracks, so the physics is unchanged. A flip still works from Angle. Switch with `M` or
+in settings.
+
+Motor sound comes from Web Audio (two detuned saws that follow the motor command, plus
+a thud on a crash), no sample files. `N` mutes it. The lap counter shows `✖n` for
+crashes in the current lap; a touchdown below 5 m/s does not count.
+
+## Tracks, records, battery
+
+Five tracks (⚙ → TRACK): **Loop** (20 gates, the original), **Sprint** (14 gates, a long
+low oval, fast), **Ridge** (22 gates, tight with big climbs and dives), **Flower** (25
+gates, five petals that cut in and out of the middle, flat) and **Tower** (16 gates, a
+small circle that climbs to 30 m and drops twice, hard pull-ups). Each track
+has its own ghost and its own top-5 table (⚙ → BEST LAPS); a lap that makes the table
+says `#n best` in the lap message. Track definitions are plain maths in `src/tracks.js`,
+so adding one is a `path(a)` function and a gate count.
+
+**Battery** (off by default, ⚙ → battery): the pack drains with motor load, about four
+minutes of hover. Below 25 % the voltage sags and the thrust ceiling falls until the
+quad cannot hold up; at 0 you drop. A reset puts a fresh pack in. It is opt-in so lap
+times stay comparable between players.
+
+**Wind** (⚙ → WIND, off by default): a steady wind up to 8 m/s with slow gusts and some
+vertical turbulence. Drag acts on the velocity relative to the air, so a hovering quad
+drifts downwind and you have to fly against it. It is deterministic, so tests can pin it.
+
+**HUD** (`O`): full boxes, a single OSD line at the bottom (mode, throttle, speed,
+altitude, lap time, gate, battery), or nothing but the crosshair.
 
 ## Rates
 
@@ -95,7 +132,8 @@ how far down you can see.
 ## Ghost and records
 
 The lap is sampled at 20 Hz and stored in localStorage, **but only when it beats the
-previous best** — so the ghost is always the lap you are trying to copy. On the next
+previous best** — so the ghost is always the lap you are trying to copy. A new record
+becomes the ghost at once, without reloading the tab. On the next
 lap it flies alongside you, and the split by the gate counter shows the delta:
 `−0.31` in green means you are ahead, `+0.44` in orange means you are behind. The delta
 comes from the best splits: at the same gate, your time against the ghost's.
@@ -130,13 +168,19 @@ Every coefficient lives in the `CFG` object at the top of `src/physics.js`.
 
 ```sh
 node test/rates.test.mjs     # rate curve + mapping of all 4 layouts
-node test/physics.test.mjs   # hover, freefall, roll ramp, flip, 60 s of random input
+node test/physics.test.mjs   # hover, freefall, roll ramp, flip, angle mode, 60 s of random input
+node test/ghost.test.mjs     # record keeping, playback alignment, storage failures
+node test/input.test.mjs     # throttle lever vs spring
+node test/tracks.test.mjs    # gate spacing and height on every track, lap table
 ```
 
 Collision runs in the browser, because `world.js` imports three, which node does not
 resolve. With the server up, open <http://localhost:8000/test/collide.html>: it sweeps
-every gate through 364 thousand contact states, and fewer than 0.5 % of cases should end
-in the frame (currently 0.04 %, mean overshoot 0.1 mm).
+every gate of every track through about a million contact states, and fewer than 0.5 % of
+cases should end in the frame (currently 0.04 %, mean overshoot 0.1 mm). The same page
+runs headless: `google-chrome --headless=new --use-angle=swiftshader
+--enable-unsafe-swiftshader --virtual-time-budget=60000 --dump-dom
+http://localhost:8000/test/collide.html` and look for `collide PASS` in the title.
 
 ![Settings panel](docs/settings.png)
 
@@ -152,6 +196,10 @@ index.html            canvas, HUD, settings panel, importmap
 src/physics.js        quad model + rate curve
 src/settings.js       layouts, presets, localStorage
 src/input.js          Gamepad API + keyboard, mapped through the layout
+src/tracks.js         track definitions (pure maths)
+src/records.js        top-5 lap table per track
+src/ghost.js          best-lap recording and playback
+src/audio.js          motor sound (Web Audio)
 src/world.js          track, collision, gate counting
 src/main.js           loop, camera, HUD, settings
 test/

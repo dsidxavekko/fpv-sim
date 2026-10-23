@@ -34,6 +34,24 @@ export const CFG = {
   iLimit: 0.10,                            // N*m integral windup clamp
   flipBoost: 2,                            // a 360 deg roll needs more than stick rates give
 
+  // angle (self-level) mode: the stick commands a tilt, an outer P loop turns the tilt
+  // error into the rate setpoint the same PID already tracks
+  angleMax: 55,                            // deg of tilt at full stick
+  angleGain: 6,                            // 1/s, rate setpoint per rad of tilt error
+  angleRateMax: 400,                       // deg/s, so a big error cannot ask for a flip
+
+  // battery (opt-in). Charge 0..1 drains with motor load (command^1.5); below `sagBelow`
+  // the thrust ceiling falls with the voltage, until the quad cannot hover any more.
+  battery: {
+    drain: 0.0119,                         // charge/s at m^1.5 = 1, ~4 min of hover
+    sagBelow: 0.25,                        // charge where the voltage sag starts
+    floor: 0.2,                            // thrust scale at 0 charge, too low to hover
+  },
+
+  // wind (opt-in): `strength` 0..1 scales this peak mean speed
+  windMax: 8,                              // m/s of steady wind at strength 1
+  windDir: 0.6,                            // rad, the way the air moves in the x-z plane
+
   // integration
   dt: 1 / 480,
   wMax: 45,                                // rad/s clamp (flips)
@@ -81,6 +99,17 @@ function yawToQuat(yawRad) {
   return { x: 0, y: Math.sin(yawRad / 2), z: 0, w: Math.cos(yawRad / 2) };
 }
 
+/** Pitch (nose up +) and roll (bank right +) of a body quaternion, in radians. */
+export function attitude(q) {
+  const f = toWorld(q, { x: 0, y: 0, z: -1 });
+  const r = toWorld(q, { x: 1, y: 0, z: 0 });
+  const u = toWorld(q, { x: 0, y: 1, z: 0 });
+  return {
+    pitch: Math.asin(clamp(f.y, -1, 1)),
+    roll: -Math.atan2(r.y, u.y),
+  };
+}
+
 export function createDrone() {
   return {
     p: { x: 0, y: 0, z: 0 },
@@ -92,6 +121,8 @@ export function createDrone() {
     wPrev: { x: 0, y: 0, z: 0 },
     flip: null,                    // { dir, t } while a roll flip is running
     crashed: false,
+    charge: 1,                     // battery 0..1, only used when opts.battery
+    t: 0,                          // sim seconds, drives the wind gusts
   };
 }
 
@@ -105,7 +136,32 @@ export function resetDrone(d, pos, yaw = 0, throttle = hoverThrottle()) {
   d.wPrev = { x: 0, y: 0, z: 0 };
   d.flip = null;
   d.crashed = false;
+  d.charge = 1;
+  d.t = 0;
 }
+
+/**
+ * Air velocity (m/s, world frame) at sim time t. A steady wind with slow gusts layered
+ * from incommensurate sines, so it never repeats audibly yet stays deterministic for
+ * tests. Vertical turbulence is a fraction of the horizontal gust.
+ */
+export function windAt(t, strength) {
+  if (!strength) return { x: 0, y: 0, z: 0 };
+  const gust = 0.75 + 0.2 * Math.sin(0.31 * t) + 0.15 * Math.sin(1.7 * t + 1);
+  const speed = CFG.windMax * strength * gust;
+  const swing = CFG.windDir + 0.25 * Math.sin(0.13 * t + 2);
+  return {
+    x: speed * Math.cos(swing),
+    y: 0.25 * speed * Math.sin(2.3 * t + 0.5),
+    z: speed * Math.sin(swing),
+  };
+}
+
+/** Multiplier on thrust for a given charge: 1 while the pack is healthy, then sagging. */
+export const batteryScale = (charge) => {
+  const { sagBelow, floor } = CFG.battery;
+  return floor + (1 - floor) * clamp(charge / sagBelow, 0, 1);
+};
 
 /** Throttle (0..1) that holds altitude at rest. Handy for tests and the HUD. */
 export const hoverThrottle = () => Math.pow((CFG.mass * CFG.gravity) / (4 * CFG.thrustMax), 1 / CFG.thrustExp);
@@ -161,7 +217,7 @@ export function startFlip(d, dir) {
  * Advance one fixed step.
  * input: { throttle 0..1, pitch -1..1 (nose up +), roll -1..1 (bank right +), yaw -1..1 (right +) }
  * rates: { roll, pitch, yaw } each [centre deg/s, max deg/s, expo]
- * opts:  { tiltComp: bool, sens: number }
+ * opts:  { tiltComp: bool, sens: number, mode: 'acro' | 'angle', battery: bool, wind: 0..1 }
  */
 export function step(d, input, dt = CFG.dt, rates = DEFAULT_RATES, opts = {}) {
   const { mass, arm, inertia: I, gravity } = CFG;
@@ -187,6 +243,15 @@ export function step(d, input, dt = CFG.dt, rates = DEFAULT_RATES, opts = {}) {
     z: -rateFor(rollCmd, rates.roll, boost > 1 ? 1 : sens) * boost,    // bank right = -Z rotation
     y: rateFor(input.yaw, rates.yaw, sens),                            // yaw right
   };
+  // Angle mode replaces roll and pitch rates with a self-levelling loop. A flip is
+  // still a rate manoeuvre, so it keeps the acro setpoints until it is done.
+  if (opts.mode === 'angle' && !(d.flip && !d.flip.done)) {
+    const lim = CFG.angleRateMax * DEG;
+    const max = CFG.angleMax * DEG;
+    const att = attitude(d.q);
+    tgt.x = clamp(CFG.angleGain * (input.pitch * max - att.pitch), -lim, lim);
+    tgt.z = -clamp(CFG.angleGain * (input.roll * max - att.roll), -lim, lim);
+  }
 
   // ---- PID on each rate axis ----
   const tau = {};
@@ -205,9 +270,15 @@ export function step(d, input, dt = CFG.dt, rates = DEFAULT_RATES, opts = {}) {
 
   // ---- motor spool lag (exact exponential) ----
   const k = 1 - Math.exp(-dt / CFG.motorTau);
+  let scale = 1;
+  if (opts.battery) {
+    scale = batteryScale(d.charge);
+    const load = d.m.reduce((n, m) => n + Math.pow(Math.max(0, m), 1.5), 0) / 4;
+    d.charge = Math.max(0, d.charge - CFG.battery.drain * load * dt);
+  }
   const T = cmds.map((c, i) => {
     d.m[i] += (c - d.m[i]) * k;
-    return CFG.thrustMax * Math.pow(d.m[i], CFG.thrustExp);
+    return CFG.thrustMax * Math.pow(d.m[i], CFG.thrustExp) * scale;
   });
   let total = T[0] + T[1] + T[2] + T[3];
 
@@ -222,7 +293,10 @@ export function step(d, input, dt = CFG.dt, rates = DEFAULT_RATES, opts = {}) {
   }
 
   // ---- forces ----
-  const vb = toBody(d.q, d.v);
+  // drag acts on the velocity relative to the air, so wind pushes the quad around
+  const air = windAt(d.t, opts.wind);
+  d.t += dt;
+  const vb = toBody(d.q, { x: d.v.x - air.x, y: d.v.y - air.y, z: d.v.z - air.z });
   const dragB = {
     x: -CFG.drag.x * vb.x * Math.abs(vb.x),
     y: -CFG.drag.y * vb.y * Math.abs(vb.y),
